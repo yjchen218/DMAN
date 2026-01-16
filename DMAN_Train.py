@@ -22,7 +22,6 @@ import torch.nn.functional as F
 
 from torch.utils.data import DataLoader, random_split
 
-# 保持引用不变
 from data_utils import build_tokenizer, build_embedding_matrix, Tokenizer4Bert, ABSADataset
 from models import LSTM, IAN, MemNet, RAM, TD_LSTM, TC_LSTM, Cabasc, ATAE_LSTM, TNet_LF, AOA, MGAN, ASGCN, LCF_BERT, ASGCN_BERT
 from models.aen import CrossEntropyLoss_LSR, AEN_BERT, AEN_GLOVE
@@ -94,9 +93,7 @@ class Instructor:
                             stdv = 1. / math.sqrt(p.shape[0])
                             torch.nn.init.uniform_(p, a=-stdv, b=stdv)
 
-    # ======================================================================================
-    # STAGE 1: 全参数训练 IG_BERT
-    # ======================================================================================
+
     def _train_stage1(self, criterion, optimizer, scheduler, train_data_loader, val_data_loader):
         logger.info("\n" + "="*30 + " STAGE 1: Training Entire IG_BERT " + "="*30)
         max_val_acc = 0
@@ -169,9 +166,6 @@ class Instructor:
 
         return path
 
-    # ======================================================================================
-    # STAGE 2: 冻结 BERT，训练自定义层 + GCN
-    # ======================================================================================
     def _train_stage2(self, criterion, optimizer_total, scheduler_total, train_data_loader, val_data_loader, IG):
         logger.info("\n" + "="*30 + " STAGE 2: Training GCN + IG_BERT Custom Layers " + "="*30)
         max_val_acc = 0
@@ -181,18 +175,13 @@ class Instructor:
         path = None
         gcn_path = None
 
-        # 【核心逻辑 - 你的理解是对的】
-        # 1. 开启全模型训练模式 (为了让 IG_BERT 的 Attention/FFN Dropout 生效)
+
         self.model.train() 
         self.IG_GCN.train()
 
-        # 2. 单独处理 BERT：设为 eval (关 Dropout) + 彻底冻结 (关梯度)
         self.model.bert.eval() 
         for param in self.model.bert.parameters():
             param.requires_grad = False
-            
-        # 3. 确保 IG_BERT 的自定义层 (attn, ffn, dense) 开启梯度
-        # (默认就是开启的，但为了保险起见，这里不需要额外操作，因为我们只关了 .bert)
 
         for i_epoch in range(self.opt.num_epoch):
             logger.info('>' * 100)
@@ -212,9 +201,6 @@ class Instructor:
                                   torch.ones(batch_size, self.opt.max_seq_len).to(self.opt.device)]
 
                 if self.opt.model_name == 'ig_bert':
-                    # 1. 计算 Intermediate Layer 梯度获取 Saliency 
-                    # 你的归因层是 ftext1/ftext2，位于 BERT 之后，所以无需 BERT 梯度
-                    # 但为了计算对 ftext 的梯度，必须 enable_grad
                     with torch.enable_grad():
                         outputs_bert, f_states = self.model(inputs, saliency_dummy)
                         loss_bert = criterion(outputs_bert, targets)
@@ -223,7 +209,6 @@ class Instructor:
                         saliency_1 = IG(loss_bert, f_states[2]) * batch_size / 2
                         saliency_2 = IG(loss_bert, f_states[3]) * batch_size / 2
                         
-                    # 2. 准备 GCN 输入
                     saliency = [saliency_1.detach(), saliency_2.detach()]
                     text_embedding = f_states[4].detach()
                     
@@ -232,8 +217,6 @@ class Instructor:
                         logger.info('> saliency_1: %s ', saliency_1[0][1:10]/2.5)
                         logger.info('> saliency_1: %s ', saliency_1[1][1:10]/2.5)
 
-
-                    # 3. GCN 训练 + IG_BERT 自定义层训练
                     outputs = self.IG_GCN(text_embedding, saliency, adj, inputs)
                     loss = criterion(outputs, targets)
                     loss.backward()
@@ -253,7 +236,6 @@ class Instructor:
                     train_loss = loss_total / n_total
                     logger.info('loss: {:.4f}, acc: {:.4f}'.format(train_loss, train_acc))
 
-            # Stage 2 评估
             val_acc, val_f1, _, _ = self._evaluate_acc_f1(val_data_loader, stage1_mode=False, criterion=criterion, IG=IG)
             logger.info('> val_acc_gcn: {:.4f}, val_f1: {:.4f}'.format(val_acc, val_f1))
             
@@ -281,9 +263,6 @@ class Instructor:
         
         return path, gcn_path
 
-    # ======================================================================================
-    # 统一评估函数
-    # ======================================================================================
     def _evaluate_acc_f1(self, data_loader, stage1_mode=True, criterion=None, IG=None, t=False):
         n_correct, n_total = 0, 0
         t_targets_all, t_outputs_all = None, None
@@ -303,10 +282,8 @@ class Instructor:
 
                 if self.opt.model_name == 'ig_bert':
                     if stage1_mode:
-                        # 阶段1：评估 IG_BERT (纯语义)
                         t_outputs, _ = self.model(t_inputs, saliency_dummy)
                     else:
-                        # 阶段2：评估 GCN
                         with torch.enable_grad():
                             t_outputs_bert, f_states = self.model(t_inputs, saliency_dummy)
                             loss_bert = criterion(t_outputs_bert, t_targets)
@@ -355,14 +332,10 @@ class Instructor:
         test_data_loader = DataLoader(dataset=self.testset, batch_size=self.opt.batch_size, shuffle=False)
         val_data_loader = DataLoader(dataset=self.valset, batch_size=self.opt.batch_size, shuffle=False)
         
-        # ==========================================
-        # STAGE 1: Train Entire IG_BERT
-        # ==========================================
         logger.info("\n" + "#"*50 + "\n STARTING STAGE 1: IG_BERT Full Fine-tuning \n" + "#"*50)
         
         self._reset_params()
         
-        # Stage 1: 优化所有参数
         _params = filter(lambda p: p.requires_grad, self.model.parameters())
         optimizer = self.opt.optimizer(_params, lr=self.opt.lr, weight_decay=self.opt.l2reg)
         
@@ -376,22 +349,11 @@ class Instructor:
             self._train_stage1(criterion, optimizer, scheduler, train_data_loader, val_data_loader)
             return
 
-        # ==========================================
-        # TRANSITION
-        # ==========================================
         logger.info("Loading best IG_BERT weights from Stage 1...")
         best_bert_path = "pretrained_ig_bert/{0}/ig_bert_{1}".format(self.opt.dataset, self.opt.dataset)
         self.model.load_state_dict(torch.load(best_bert_path))
         
-        # ==========================================
-        # STAGE 2: Train GCN + IG_BERT Head (Freeze BERT)
-        # ==========================================
         logger.info("\n" + "#"*50 + "\n STARTING STAGE 2: GCN + IG_BERT Head Training \n" + "#"*50)
-
-        # 优化器分组: 剔除 frozen 的 BERT
-        # 因为我们显式将 bert 参数 requires_grad 设为 False，filter 自动会过滤掉它们
-        # 所以这里可以直接用 filter 过滤全模型参数，比手动分组更安全
-        
         params_to_optimize = [
             {'params': filter(lambda p: p.requires_grad, self.model.parameters())}, # IG_BERT 中剩下来 requires_grad=True 的部分
             {'params': self.IG_GCN.parameters()}
@@ -403,9 +365,6 @@ class Instructor:
         best_bert_path_s2, best_gcn_path_s2 = self._train_stage2(criterion, optimizer_total, scheduler_total,
                                                                  train_data_loader, val_data_loader, IG)
         
-        # ==========================================
-        # FINAL TEST
-        # ==========================================
         logger.info("Loading best weights from Stage 2 for Final Testing...")
         self.model.load_state_dict(torch.load(best_bert_path_s2))
         self.IG_GCN.load_state_dict(torch.load(best_gcn_path_s2))
