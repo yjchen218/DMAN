@@ -1,8 +1,3 @@
-# -*- coding: utf-8 -*-
-# file: train.py
-# author: songyouwei <youwei0314@gmail.com> (Final Verified Version)
-# Copyright (C) 2018. All Rights Reserved.
-
 import logging
 import argparse
 import math
